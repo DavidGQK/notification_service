@@ -1,0 +1,289 @@
+version: "3.2"
+services:
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: 'rabbitmq'
+    ports:
+        - 5672:5672
+        - 15672:15672
+    volumes:
+        - ~/.docker-conf/rabbitmq/data/:/var/lib/rabbitmq/
+        - ~/.docker-conf/rabbitmq/log/:/var/log/rabbitmq
+        - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+        - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json
+    networks:
+        - rabbitmq
+
+  notif_db:
+    image: postgres:13-alpine
+    container_name: notif_db
+    env_file:
+      - ./.env
+    environment:
+      - POSTGRES_DB=notif_db
+      - POSTGRES_HOST=notif_db
+    volumes:
+      - notif_db_data:/var/lib/postgresql/data/
+    restart: always
+    ports:
+      - "5432:5432"
+    networks:
+      - rabbitmq
+
+  rabbitworker:
+    build: 
+      context: ./workers
+      dockerfile: Dockerfile_rabbit
+    container_name: rabbitworker
+    env_file:
+      - ./.env
+    environment:
+      - RABBIT_HOST=rabbitmq
+      - POSTGRES_DB=notif_db
+      - POSTGRES_HOST=notif_db
+    depends_on:
+      - rabbitmq
+      - notif_db
+    networks:
+      - rabbitmq
+    restart: on-failure
+
+  enrichworker:
+    build: 
+      context: ./workers
+      dockerfile: Dockerfile_enrich
+    container_name: enrichworker
+    env_file:
+      - ./.env
+    environment:
+      - RABBIT_HOST=rabbitmq
+      - POSTGRES_DB=notif_db
+      - POSTGRES_HOST=notif_db
+      - AUTH_URL=http://flask_auth:5000/auth/api/v1/get_user_by_id
+    depends_on:
+      - rabbitmq
+      - notif_db
+    networks:
+      - rabbitmq
+    restart: on-failure
+
+  senderworker:
+    build: 
+      context: ./workers
+      dockerfile: Dockerfile_sender
+    container_name: senderworker
+    env_file:
+      - ./.env
+    environment:
+      - POSTGRES_DB=notif_db
+      - POSTGRES_HOST=notif_db
+    depends_on:
+      - notif_db
+    networks:
+      - rabbitmq
+    restart: on-failure
+
+  notifadmin:
+    build: 
+      context: ./notif_admin_panel
+      dockerfile: Dockerfile
+    container_name: notifadmin
+    volumes:
+      - static_volume:/app/static
+    env_file:
+      - ./.env
+    environment:
+      - POSTGRES_DB=notif_db
+      - POSTGRES_HOST=notif_db
+    depends_on:
+      - notif_db
+    command: bash -c "python script.py && gunicorn admin_notif.wsgi --bind 0.0.0.0:8082"
+    ports:
+      - '8082:8082' 
+    networks:
+      - rabbitmq
+    restart: on-failure
+
+  auth_db:
+    image: postgres:13-alpine
+    container_name: auth_db
+    env_file: 
+      - ./.env
+    environment:
+      - POSTGRES_DB=auth_db
+      - POSTGRES_HOST=auth_db
+    volumes:
+      - auth_db_data:/var/lib/postgresql/data/
+    restart: always
+    networks:
+      - rabbitmq
+
+  redis_auth:
+    image: redis:alpine
+    container_name: redis_auth
+    env_file: 
+      - ./.env
+    volumes:
+      - redis_data:/data
+    restart: always
+    networks:
+      - rabbitmq
+
+  flask_auth:
+    build: ./flask_auth
+    container_name: flask_auth
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/flask_auth
+      - RABBIT_HOST=rabbitmq
+      - POSTGRES_DB=auth_db
+      - POSTGRES_HOST=auth_db
+      - DB_DOCKER_HOST=auth_db
+    working_dir: /flask_auth
+    depends_on:
+      - redis_auth
+      - auth_db
+    ports:
+      - "5000:5000"
+    restart: always
+    networks:
+      - rabbitmq
+
+  ugc_api:
+    build: ./ugc_api
+    container_name: ugc_api
+    env_file:
+      - .env
+    environment:
+      - RABBIT_HOST=rabbitmq
+      - MONGO_URL=mongodb://mongodb:27017
+    depends_on:
+      - mongodb
+    ports:
+      - '8000:8000'
+    networks:
+      - rabbitmq
+
+  mongodb:
+    container_name: mongodb
+    image: mongo
+    ports:
+      - 27017:27017
+    volumes:
+      - mo_data:/mo_data
+    networks:
+      - rabbitmq
+
+  broker:
+    image: confluentinc/cp-server:7.3.0
+    hostname: broker
+    container_name: broker
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_METRIC_REPORTERS: io.confluent.metrics.reporter.ConfluentMetricsReporter
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      CONFLUENT_METRICS_REPORTER_BOOTSTRAP_SERVERS: broker:29092
+      CONFLUENT_METRICS_REPORTER_TOPIC_REPLICAS: 1
+      CONFLUENT_METRICS_ENABLE: 'true'
+      CONFLUENT_SUPPORT_CUSTOMER_ID: 'anonymous'
+    restart: always
+    networks:
+      - rabbitmq
+
+  zookeeper:
+    image: zookeeper:3.5
+    container_name: zookeeper
+    hostname: zookeeper
+    networks:
+      - rabbitmq
+
+
+  clickhouse-node1:
+    image: yandex/clickhouse-server:20.4
+    container_name: clickhouse-node1
+    hostname: clickhouse-node1
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./db/clickhouse/data/node1:/etc/clickhouse-server
+      - ./db/clickhouse/data/shard_1:/docker-entrypoint-initdb.d/
+    depends_on:
+      - zookeeper
+    networks:
+      - rabbitmq
+
+  clickhouse-node2:
+    image: yandex/clickhouse-server:20.4
+    container_name: clickhouse-node2
+    hostname: clickhouse-node2
+    volumes:
+      - ./db/clickhouse/data/node2:/etc/clickhouse-server
+      - ./db/clickhouse/data/replica_2_4:/docker-entrypoint-initdb.d/
+    depends_on:
+      - zookeeper
+    networks:
+      - rabbitmq
+
+  clickhouse-node3:
+    image: yandex/clickhouse-server:20.4
+    container_name: clickhouse-node3
+    hostname: clickhouse-node3
+    volumes:
+      - ./db/clickhouse/data/node3:/etc/clickhouse-server
+      - ./db/clickhouse/data/shard_3:/docker-entrypoint-initdb.d/
+    depends_on:
+      - zookeeper
+    networks:
+      - rabbitmq
+
+  clickhouse-node4:
+    image: yandex/clickhouse-server:20.4
+    container_name: clickhouse-node4
+    hostname: clickhouse-node4
+    volumes:
+      - ./db/clickhouse/data/node4:/etc/clickhouse-server
+      - ./db/clickhouse/data/replica_2_4:/docker-entrypoint-initdb.d/
+    depends_on:
+      - zookeeper
+    networks:
+      - rabbitmq
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: mailhog
+    restart: always
+    logging:
+      driver: 'none'
+    ports:
+      - 1025:1025
+      - 8025:8025
+    networks:
+      - rabbitmq
+
+volumes:
+  notif_db_data:
+  auth_db_data:
+  redis_data:
+  mo_data:
+  static_volume:
+
+networks:
+  rabbitmq:
+    driver: bridge

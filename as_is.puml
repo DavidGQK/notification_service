@@ -1,0 +1,26 @@
+@startuml as is
+
+skinparam componentStyle uml2
+actor Admin
+actor User
+database NotificationDatabase
+component UGC
+component Auth
+component RabbitMQ
+component AdminPanel
+component WorkerRabbit
+component WorkerEnrich
+component WorkerSender
+
+Admin -left-> AdminPanel
+AdminPanel <-left-> NotificationDatabase
+UGC -right-> RabbitMQ
+Auth -up-> RabbitMQ
+RabbitMQ -right-> WorkerRabbit
+WorkerRabbit -right-> NotificationDatabase
+WorkerSender <-down-> NotificationDatabase : status update
+User <-left- WorkerSender : send email
+WorkerEnrich <-left-> Auth : data requirement
+WorkerEnrich <-up-> NotificationDatabase : data enrichment
+
+@enduml
